@@ -24,6 +24,7 @@ module Fluent
     config_param :key_path, :string, :default => '/etc/opt/microsoft/omsagent/certs/oms.key'
     config_param :proxy_conf_path, :string, :default => '/etc/opt/microsoft/omsagent/proxy.conf'
     config_param :compress, :bool, :default => true
+    config_param :run_in_background, :bool, :default => true
 
     def configure(conf)
       s = conf.add_element("secondary")
@@ -90,16 +91,8 @@ module Fluent
       return [tag, record].to_msgpack
     end
 
-    # This method is called every flush interval. Send the buffer chunk to OMS. 
-    # 'chunk' is a buffer chunk that includes multiple formatted
-    # NOTE! This method is called by internal thread, not Fluentd's main thread. So IO wait doesn't affect other plugins.
-    def write(chunk)
-      # Quick exit if we are missing something
-      if !OMS::Configuration.load_configuration(omsadmin_conf_path, cert_path, key_path)
-        raise OMS::RetryRequestException, 'Missing configuration. Make sure to onboard.'
-      end
-
-      # Group records based on their datatype because OMS does not support a single request with multiple datatypes. 
+    def self_write(chunk)
+      # Group records based on their datatype because OMS does not support a single request with multiple datatypes.
       datatypes = {}
       unmergable_records = []
       chunk.msgpack_each {|(tag, record)|
@@ -129,6 +122,23 @@ module Fluent
       unmergable_records.each { |key, record|
         handle_record(key, record)
       }
+    end
+
+    # This method is called every flush interval. Send the buffer chunk to OMS. 
+    # 'chunk' is a buffer chunk that includes multiple formatted
+    # NOTE! This method is called by (out_oms) plugin thread not Fluentd's main thread. So IO wait doesn't affect other plugins.
+    def write(chunk)
+      # Quick exit if we are missing something
+      if !OMS::Configuration.load_configuration(omsadmin_conf_path, cert_path, key_path)
+        raise OMS::RetryRequestException, 'Missing configuration. Make sure to onboard.'
+      end
+
+      if run_in_background
+        OMS::BackgroundJobs.instance.run_job_and_wait { self_write(chunk) }
+      else
+        self_write(chunk)
+      end
+
     end
 
   private

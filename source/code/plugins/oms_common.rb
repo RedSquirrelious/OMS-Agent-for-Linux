@@ -1019,4 +1019,124 @@ module OMS
     end
   end
 
+  require 'singleton'
+
+  class BackgroundJobs
+    include Singleton
+
+    attr_reader :proc_cache
+    def initialize
+      @proc_cache = {}
+      @proc_cache_lock = Mutex.new
+      @master_process = Process.pid
+
+      ObjectSpace.define_finalizer(self, self.class.method(:finalize).to_proc)
+    end
+
+    private
+
+
+    def add_process_to_cache(pid)
+      @proc_cache_lock.synchronize {
+        @proc_cache[pid] = pid
+      }
+    end
+
+    def remove_process_from_cache(pid)
+      @proc_cache_lock.synchronize {
+        @proc_cache.delete(pid)
+      }
+    end
+
+    public
+
+    def self.finalize(object_id)
+      return if Process.ppid == 1 or Process.pid != self.instance.get_mpid
+      self.instance.cleanup_processes
+    end
+
+    def get_mpid
+      return @master_process
+    end
+
+    def log(msg)
+      puts "#{self.class.name}: #{msg}"
+    end
+
+    def log_error(msg)
+      p msg
+    end
+
+    def cleanup_processes
+      log "cleanup processes pid=#{Process.pid} mpid=#{self.get_mpid} ppid=#{Process.ppid}"
+      return if @proc_cache.empty?
+
+      @proc_cache.each do |pid, val|
+        Process.kill('SIGTERM', pid)
+      end
+      @proc_cache_lock.synchronize {
+        @proc_cache.clear
+      }
+    end
+
+    def run_job_and_wait(&block)
+      read_io, write_io = IO.pipe
+
+      pid = fork do
+        ["SIGHUP", "SIGTERM"].each do |sig|
+          Signal.trap(sig) { log "##{Process.pid} receiving #{sig}\n"; exit }
+        end
+
+        read_io.close # For parent's use, not child's use
+        result = {}
+        begin
+          result[:return] = yield
+        rescue => e # We should catch any exception to pass it to parent
+          result[:exception] = {'class': e.class.name, 'msg': e.message}
+        end
+        # process is orphan
+        if Process.ppid == 1
+          Process.exit(false)
+        end
+
+        write_io.write(result)
+      end
+      add_process_to_cache(pid)
+      write_io.close # For child use
+      # blocking read on pipe
+      results = eval(read_io.read)
+      log results
+
+      read_io.close
+      Process.waitpid(pid)
+      remove_process_from_cache(pid)
+
+      if results.key?(:exception) and results[:exception] != nil
+        ex_class_name = results[:exception][:class]
+        ex_msg = results[:exception][:msg]
+        if const_defined?(ex_class_name)
+          exception = Object.const_get(ex_class_name, Class.new).new(ex_msg)
+          raise exception
+        else
+          log_error "exception not found '#{ex_class_name}', we will raise a generic exception with msg='#{ex_msg}'"
+          raise Exception, ex_msg
+        end
+      end
+
+      if results.key?(:return) and results[:return] != nil
+        return results[:return]
+      end
+
+      return nil
+    end
+
+    def run_job_async(callback, &block)
+      thread = Thread.new {
+        results = self.run_job_and_wait(&block)
+        callback.call(results) if callback != nil
+      }
+    end
+
+  end
+
 end # module OMS

@@ -32,6 +32,7 @@ module Fluent
     config_param :blob_uri_expiry, :string, :default => '00:10:00'
     config_param :url_suffix_template, :string, :default => "custom_data_type + '/00000000-0000-0000-0000-000000000002/' + OMS::Common.get_hostname + '/' + OMS::Configuration.agent_id + '/' + suffix + '.log'"
     config_param :proxy_conf_path, :string, :default => '/etc/opt/microsoft/omsagent/proxy.conf'
+    config_param :run_in_background, :bool, :default => true
 
     def configure(conf)
       super
@@ -389,16 +390,8 @@ module Fluent
       [tag, record].to_msgpack
     end
 
-    # This method is called every flush interval. Send the buffer chunk to OMS. 
-    # 'chunk' is a buffer chunk that includes multiple formatted
-    # NOTE! This method is called by internal thread, not Fluentd's main thread. So IO wait doesn't affect other plugins.
-    def write(chunk)
-      # Quick exit if we are missing something
-      if !OMS::Configuration.load_configuration(omsadmin_conf_path, cert_path, key_path)
-        raise 'Missing configuration. Make sure to onboard. Will continue to buffer data.'
-      end
-
-      # Group records based on their datatype because OMS does not support a single request with multiple datatypes. 
+    def self_write(chunk)
+      # Group records based on their datatype because OMS does not support a single request with multiple datatypes.
       datatypes = {}
       chunk.msgpack_each {|(tag, record)|
         if !datatypes.has_key?(tag)
@@ -409,6 +402,22 @@ module Fluent
 
       datatypes.each do |tag, records|
         handle_records(tag, records)
+      end
+    end
+
+    # This method is called every flush interval. Send the buffer chunk to OMS.
+    # 'chunk' is a buffer chunk that includes multiple formatted
+    # NOTE! This method is called by (out_oms_blob) plugin thread not Fluentd's main thread. So IO wait doesn't affect other plugins.
+    def write(chunk)
+      # Quick exit if we are missing something
+      if !OMS::Configuration.load_configuration(omsadmin_conf_path, cert_path, key_path)
+        raise 'Missing configuration. Make sure to onboard. Will continue to buffer data.'
+      end
+
+      if run_in_background
+        OMS::BackgroundJobs.instance.run_job_and_wait { self_write(chunk) }
+      else
+        self_write(chunk)
       end
     end
 

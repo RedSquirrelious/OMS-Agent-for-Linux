@@ -21,6 +21,7 @@ module Fluent
     config_param :key_path, :string, :default => '/etc/opt/microsoft/omsagent/certs/oms.key'
     config_param :proxy_conf_path, :string, :default => '/etc/opt/microsoft/omsagent/proxy.conf'
     config_param :compress, :bool, :default => true
+    config_param :run_in_background, :bool, :default => true
 
     def configure(conf)
       super
@@ -74,12 +75,7 @@ module Fluent
       end
     end
 
-    def write(chunk)
-      # Quick exit if we are missing something
-      if !OMS::Configuration.load_configuration(omsadmin_conf_path, cert_path, key_path)
-        raise OMS::RetryRequestException, 'Missing configuration. Make sure to onboard.'
-      end
-
+    def self_write(chunk)
       # ipname to dataitems array hash
       ipnameRecords = Hash.new
 
@@ -103,6 +99,19 @@ module Fluent
         OMS::Diag.ProcessDataItemsPostAggregation(dataitemArray, OMS::Configuration.agent_id)
         record = OMS::Diag.CreateDiagRecord(dataitemArray, ipname)
         handle_record(ipname, record)
+      end
+    end
+
+    def write(chunk)
+      # Quick exit if we are missing something
+      if !OMS::Configuration.load_configuration(omsadmin_conf_path, cert_path, key_path)
+        raise OMS::RetryRequestException, 'Missing configuration. Make sure to onboard.'
+      end
+
+      if run_in_background
+        OMS::BackgroundJobs.instance.run_job_and_wait { self_write(chunk) }
+      else
+        self_write(chunk)
       end
     end
 
